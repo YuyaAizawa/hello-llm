@@ -107,20 +107,20 @@ class Block(nn.Module):
   def __init__(self, n_embd, n_head):
     super().__init__()
     head_size = n_embd // n_head
-    self.sa = MultiHeadAttention(n_head, head_size)
     self.norm1 = nn.LayerNorm(n_embd)
-    self.ffwd = FeedFoward(n_embd)
+    self.sa = MultiHeadAttention(n_head, head_size)
     self.norm2 = nn.LayerNorm(n_embd)
+    self.ffwd = FeedFoward(n_embd)
 
   def forward(self, x):
     identity = x
+    x = self.norm1(x)
     x = self.sa(x)
     x += identity
-    x = self.norm1(x)
+    x = self.norm2(x)
     identity = x
     x = self.ffwd(x)
     x += identity
-    x = self.norm2(x)
     return x
 
 class BigramLanguageModel(nn.Module):
