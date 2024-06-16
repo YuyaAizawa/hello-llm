@@ -1,13 +1,16 @@
+import math
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
 
+from twilog_data_loader import TwilogDataLoader
+
 
 torch.manual_seed(114514)
-batch_size = 64
-block_size = 256
-max_iters = 3000
-eval_interval = 500
+batch_size = 128
+block_size = 142
+max_iters = 3001
+eval_interval = 100
 learning_rate = 3e-4
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 eval_iters = 200
@@ -30,31 +33,20 @@ decode = lambda l: ''.join([itos[i] for i in l])
 
 data = torch.tensor(encode(text), dtype=torch.long)
 
-n = int(0.9*len(data))
-train_data = data[:n]
-val_data = data[n:]
+class PositionalEncoding(nn.Module):
 
-def get_batch(split):
-  data = train_data if split == 'train' else val_data
-  ix = torch.randint(len(data) - block_size, (batch_size, ))
-  x = torch.stack([data[i:i+block_size] for i in ix])
-  y = torch.stack([data[i+1:i+block_size+1] for i in ix])
-  x, y = x.to(device), y.to(device)
-  return x, y
+    def __init__(self, n_embd, block_size):
+        super().__init__()
+        position = torch.arange(block_size).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, n_embd, 2) * (-math.log(10000.0) / n_embd))
+        pe = torch.zeros(block_size, 1, n_embd)
+        pe[:, 0, 0::2] = torch.sin(position * div_term)
+        pe[:, 0, 1::2] = torch.cos(position * div_term)
+        self.register_buffer('pe', pe)
 
-@torch.no_grad()
-def estimate_loss():
-  out = {}
-  model.eval()
-  for split in ['train', 'val']:
-    losses = torch.zeros(eval_iters)
-    for k in range(eval_iters):
-      X, Y = get_batch(split)
-      logits, loss = model(X, Y)
-      losses[k] = loss.item()
-    out[split] = losses.mean()
-  model.train()
-  return out
+    def forward(self, x):
+        x += self.pe[:x.size(0)]
+        return x
 
 class Head(nn.Module):
 
@@ -65,12 +57,14 @@ class Head(nn.Module):
     self.value = nn.Linear(n_embd, head_size, bias=False)
     self.register_buffer('tril', torch.tril(torch.ones(block_size, block_size)))
 
-  def forward(self, x):
+  def forward(self, x, attn_mask=None):
     B, T, C = x.shape
     k = self.key(x)
     q = self.query(x)
     wei = q @ k.transpose(-2, -1) * C**-0.5
     wei = wei.masked_fill(self.tril[:T, :T] == 0, float('-inf'))
+    if attn_mask is not None:
+      wei += attn_mask
     wei = F.softmax(wei, dim=-1)
     v = self.value(x)
     out = wei @ v
@@ -83,8 +77,8 @@ class MultiHeadAttention(nn.Module):
     self.heads = nn.ModuleList([Head(head_size) for _ in range(num_heads)])
     self.proj = nn.Linear(n_embd, n_embd)
 
-  def forward(self, x):
-    out = torch.cat([h(x) for h in self.heads], dim=-1)
+  def forward(self, x, attn_mask=None):
+    out = torch.cat([h(x, attn_mask) for h in self.heads], dim=-1)
     out = self.proj(out)
     return out
 
@@ -112,10 +106,10 @@ class Block(nn.Module):
     self.norm2 = nn.LayerNorm(n_embd)
     self.ffwd = FeedFoward(n_embd)
 
-  def forward(self, x):
+  def forward(self, x, attn_mask=None):
     identity = x
     x = self.norm1(x)
-    x = self.sa(x)
+    x = self.sa(x, attn_mask)
     x += identity
     x = self.norm2(x)
     identity = x
@@ -123,33 +117,40 @@ class Block(nn.Module):
     x += identity
     return x
 
-class BigramLanguageModel(nn.Module):
+class LanguageModel(nn.Module):
 
-  def __init__(self):
+  def __init__(self, vocab_size, device='cpu'):
     super().__init__()
     self.token_embedding_table = nn.Embedding(vocab_size, n_embd)
-    self.position_embedding_table = nn.Embedding(block_size, n_embd)
-    self.blocks = nn.Sequential(*[Block(n_embd, n_head=n_head) for _ in range(n_layer)])
+    self.posenc = PositionalEncoding(n_embd, block_size)
+    self.blocks = nn.ModuleList()
+    for _ in range(n_layer):
+      self.blocks.append(Block(n_embd, n_head=n_head))
     self.norm = nn.LayerNorm(n_embd)
     self.lm_head = nn.Linear(n_embd, vocab_size)
 
-  def forward(self, idx, targets=None):
+  def forward(self, idx, targets=None, attn_mask=None):
     B, T = idx.shape
 
-    token_embedding = self.token_embedding_table(idx)  # (B, T, C)
-    position_embedding = self.position_embedding_table(torch.arange(T, device=device))  # (T, C)
-    x = token_embedding + position_embedding  # (B, T, C)
-    x = self.blocks(x)  # (B, T, C)
+    if attn_mask is not None:
+      attn_mask = attn_mask[:, None, :]
+      attn_mask = attn_mask.to(dtype=torch.float)
+      attn_mask = torch.where(attn_mask == 0, float('-inf'), 0.0)
+
+    x = self.token_embedding_table(idx)  # (B, T, C)
+    x = self.posenc(x)  # (B, T, C)
+    for block in self.blocks:
+      x = block(x, attn_mask)  # (B, T, C)
     x = self.norm(x)
     logits = self.lm_head(x)  # (B, T, vocab_size)
 
     if targets is None:
       loss = None
     else :
-      B, T, C = logits.shape
-      logits = logits.view(B*T, C)
+      B, T, V = logits.shape
+      logits = logits.view(B*T, V)
       targets = targets.view(B*T)
-      loss = F.cross_entropy(logits, targets)
+      loss = F.cross_entropy(logits, targets, ignore_index=2)
     return logits, loss
 
   def generate(self, idx, max_new_tokens):
@@ -162,8 +163,27 @@ class BigramLanguageModel(nn.Module):
       idx = torch.cat((idx, idx_next), dim=1)
     return idx
 
-model = BigramLanguageModel()
+@torch.no_grad()
+def estimate_loss():
+  out = {}
+  model.eval()
+  for split in ['train', 'val']:
+    losses = torch.zeros(eval_iters)
+    for k in range(eval_iters):
+      X, Y, mask = tweets.get_batch(batch_size, split)
+      logits, loss = model(X, Y, mask)
+      losses[k] = loss.item()
+    out[split] = losses.mean()
+  model.train()
+  return out
+
+tweets = TwilogDataLoader('data/TypedTypelessTy-240615.csv', block_size, device)
+model = LanguageModel(tweets.vocab_size)
 model = model.to(device)
+
+print(model)
+total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+print(total_params)
 
 optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
 
@@ -173,14 +193,14 @@ for iter in range(max_iters):
     losses = estimate_loss()
     print(f"step {iter}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
 
-  xb, yb = get_batch('train')
+  xb, yb, attn_mask = tweets.get_batch(batch_size, 'train')
 
-  logits, loss = model(xb, yb)
+  logits, loss = model(xb, yb, attn_mask)
   optimizer.zero_grad(set_to_none=True)
   loss.backward()
   optimizer.step()
 
-
-print(model)
-context = torch.zeros((1, 1), dtype=torch.long, device=device)
-print(decode(model.generate(context, max_new_tokens=100)[0].tolist()))
+context = torch.zeros((16, 1), dtype=torch.long, device=device)
+results = model.generate(context, max_new_tokens=140)
+for result in results:
+  print(tweets.decode(result.tolist()).split('<eot>')[0])
