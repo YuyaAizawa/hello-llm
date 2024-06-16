@@ -9,14 +9,14 @@ from twilog_data_loader import TwilogDataLoader
 torch.manual_seed(114514)
 batch_size = 128
 block_size = 142
-max_iters = 3001
+max_iters = 2001
 eval_interval = 100
 learning_rate = 3e-4
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 eval_iters = 200
-n_embd = 256
-n_head = 8
-n_layer = 6
+n_embd = 512
+n_head = 16
+n_layer = 8
 
 print(f"device: {device}")
 
@@ -177,13 +177,32 @@ def estimate_loss():
   model.train()
   return out
 
+# logger
+import logging
+from datetime import datetime
+logger = logging.getLogger('twilog')
+logger.setLevel(logging.DEBUG)
+formatter = logging.Formatter('%(asctime)s - %(message)s')
+# for console
+console_handler = logging.StreamHandler()
+console_handler.setLevel(logging.DEBUG)
+console_handler.setFormatter(formatter)
+logger.addHandler(console_handler)
+# for file
+file_handler = logging.FileHandler('twilog_{}.log'.format(datetime.utcnow().strftime("%Y%m%d%H%M")))
+file_handler.setLevel(logging.DEBUG)
+file_handler.setFormatter(formatter)
+logger.addHandler(file_handler)
+
+logger.info(f'batch_size = {batch_size}, block_size = {block_size}, learning_rate = {learning_rate}, max_iters = {max_iters}')
+
 tweets = TwilogDataLoader('data/TypedTypelessTy-240615.csv', block_size, device)
 model = LanguageModel(tweets.vocab_size)
 model = model.to(device)
 
-print(model)
+logger.info(model)
 total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-print(total_params)
+logger.info(f'total_params = {total_params}')
 
 optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
 
@@ -191,7 +210,7 @@ for iter in range(max_iters):
 
   if iter % eval_interval == 0:
     losses = estimate_loss()
-    print(f"step {iter}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
+    logger.info(f"step {iter}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
 
   xb, yb, attn_mask = tweets.get_batch(batch_size, 'train')
 
@@ -203,4 +222,4 @@ for iter in range(max_iters):
 context = torch.zeros((16, 1), dtype=torch.long, device=device)
 results = model.generate(context, max_new_tokens=140)
 for result in results:
-  print(tweets.decode(result.tolist()).split('<eot>')[0])
+  logger.info(tweets.decode(result.tolist()).split('<eot>')[0])
