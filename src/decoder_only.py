@@ -9,11 +9,11 @@ from twilog_data_loader import TwilogDataLoader
 torch.manual_seed(114514)
 batch_size = 128
 block_size = 142
-max_iters = 2001
+max_iters = 1001
 eval_interval = 100
 learning_rate = 3e-4
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
-eval_iters = 200
+eval_iters = 100
 n_embd = 512
 n_head = 16
 n_layer = 8
