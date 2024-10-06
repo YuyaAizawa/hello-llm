@@ -7,16 +7,17 @@ from twilog_data_loader import TwilogDataLoader
 
 
 torch.manual_seed(114514)
-batch_size = 128
-block_size = 142
-max_iters = 1001
-eval_interval = 100
-learning_rate = 1e-4
-device = 'cuda' if torch.cuda.is_available() else 'cpu'
-eval_iters = 100
-n_embd = 512
-n_head = 16
+n_embd = 768
+n_head = 12
 n_layer = 8
+
+batch_size = 96
+block_size = 142
+learning_rate = 1e-4
+epochs = 10
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
+eval_interval = 100
+eval_iters = 100
 
 print(f"device: {device}")
 
@@ -185,7 +186,7 @@ file_handler.setLevel(logging.DEBUG)
 file_handler.setFormatter(formatter)
 logger.addHandler(file_handler)
 
-logger.info(f'batch_size = {batch_size}, block_size = {block_size}, learning_rate = {learning_rate}, max_iters = {max_iters}')
+logger.info(f'batch_size = {batch_size}, block_size = {block_size}, learning_rate = {learning_rate}, max_epochs = {epochs}')
 
 tweets = TwilogDataLoader('data/TypedTypelessTy-240615.csv', block_size, device)
 model = LanguageModel(tweets.vocab_size)
@@ -197,18 +198,28 @@ logger.info(f'total_params = {total_params}')
 
 optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
 
-for iter in range(max_iters):
+step = 0
+count = 0
+for epoch in range(1, epochs+1):
+  for batch in tweets.batch_iter(batch_size, 'train'):
 
-  if iter % eval_interval == 0:
-    losses = estimate_loss()
-    logger.info(f"step {iter}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
+    # if step % eval_interval == 0:
+    #   losses = estimate_loss()
+    #   logger.info(f"step {step}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
 
-  xb, yb, attn_mask = tweets.get_batch(batch_size, 'train')
+    logits, loss = model(*batch)
 
-  logits, loss = model(xb, yb, attn_mask)
-  optimizer.zero_grad(set_to_none=True)
-  loss.backward()
-  optimizer.step()
+    optimizer.zero_grad(set_to_none=True)
+    loss.backward()
+    optimizer.step()
+
+    step += 1
+    count += batch[0].shape[0]
+
+  losses = estimate_loss()
+  logger.info(f"epoch {epoch}(step: {step}): train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
+
+torch.save(model.state_dict(), 'save.pth')
 
 context = torch.zeros((16, 1), dtype=torch.long, device=device)
 results = model.generate(context, max_new_tokens=140)

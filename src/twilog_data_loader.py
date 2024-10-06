@@ -68,5 +68,21 @@ class TwilogDataLoader():
     return x.to(self.device), y.to(self.device), attn_mask.to(self.device)
 
 
+  def batch_iter(self, batch_size, split):
+    data = self.train_data if split == 'train' else self.val_data
+    start = 0
+
+    while start < len(data):
+      end = start + batch_size if start + batch_size < len(data) else len(data)
+      tweets = torch.tensor(data[start:end])
+
+      x = tweets[:, :-1].contiguous()
+      y = tweets[:, 1:].contiguous()
+      attn_mask = torch.where(x == 2, 0, 1)
+
+      start = end
+      yield x, y, attn_mask
+
+
   def decode(self, l):
     return ''.join([self.itos[i] for i in l])
