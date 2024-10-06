@@ -50,6 +50,7 @@ class TwilogDataLoader():
     data = torch.tensor(data, device=device, dtype=torch.long)
     data = data.view(len(tweets), block_size + 1)
 
+    random.shuffle(data)
     n = int(0.9*len(data))
     self.train_data = data[:n]
     self.val_data = data[n:]

@@ -11,7 +11,7 @@ batch_size = 128
 block_size = 142
 max_iters = 1001
 eval_interval = 100
-learning_rate = 3e-4
+learning_rate = 1e-4
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 eval_iters = 100
 n_embd = 512
@@ -19,34 +19,6 @@ n_head = 16
 n_layer = 8
 
 print(f"device: {device}")
-
-with open('data/input.txt', 'r', encoding='utf-8') as f:
-  text = f.read()
-
-chars = sorted(list(set(text)))
-vocab_size = len(chars)
-
-stoi = { ch:i for i, ch in enumerate(chars) }
-itos = { i:ch for i, ch in enumerate(chars) }
-encode = lambda s: [stoi[c] for c in s]
-decode = lambda l: ''.join([itos[i] for i in l])
-
-data = torch.tensor(encode(text), dtype=torch.long)
-
-class PositionalEncoding(nn.Module):
-
-    def __init__(self, n_embd, block_size):
-        super().__init__()
-        position = torch.arange(block_size).unsqueeze(1)
-        div_term = torch.exp(torch.arange(0, n_embd, 2) * (-math.log(10000.0) / n_embd))
-        pe = torch.zeros(block_size, 1, n_embd)
-        pe[:, 0, 0::2] = torch.sin(position * div_term)
-        pe[:, 0, 1::2] = torch.cos(position * div_term)
-        self.register_buffer('pe', pe)
-
-    def forward(self, x):
-        x += self.pe[:x.size(0)]
-        return x
 
 class Head(nn.Module):
 
@@ -57,17 +29,38 @@ class Head(nn.Module):
     self.value = nn.Linear(n_embd, head_size, bias=False)
     self.register_buffer('tril', torch.tril(torch.ones(block_size, block_size)))
 
+    assert head_size % 2 == 0
+    theta = 1. / (10000 ** (torch.arange(0, head_size, 2).float() / head_size))
+    pos = torch.arange(block_size)
+    freqs = pos.unsqueeze(1) * theta.unsqueeze(0)
+    freqs = freqs.unsqueeze(-1).expand(block_size, head_size // 2, 2).reshape(block_size, -1)
+    self.register_buffer('freqs', freqs)
+
+  def rot_half(self, x):                      # [1, 2, 3, 4]
+    d = x.shape[-1] // 2
+    x = x.view(*x.shape[:-1], d, 2)     # [[1, 2], [3, 4]]
+    x1, x2 = x.unbind(dim=-1)           # [1, 3], [2, 4]
+    x = torch.stack((-x2, x1), dim=-1)  # [[-2, 1], [-4, 3]]
+    x = x.view(*x.shape[:-2], d * 2)    # [-2, 1, -4, 3]
+    return x
+
+  def rot(self, x):
+    freqs = self.freqs[:x.shape[-2], :]
+    return x * freqs.cos() + self.rot_half(x) * freqs.sin()
+
   def forward(self, x, attn_mask=None):
     B, T, C = x.shape
-    k = self.key(x)
-    q = self.query(x)
-    wei = q @ k.transpose(-2, -1) * C**-0.5
+    k = self.key(x)  # [B*T*H]
+    q = self.query(x)  # [B*T*H]
+    k = self.rot(k)
+    q = self.rot(k)
+    wei = q @ k.transpose(-2, -1) * C**-0.5  # [B*T*T]
     wei = wei.masked_fill(self.tril[:T, :T] == 0, float('-inf'))
     if attn_mask is not None:
       wei += attn_mask
     wei = F.softmax(wei, dim=-1)
-    v = self.value(x)
-    out = wei @ v
+    v = self.value(x)  # [B*T*H]
+    out = wei @ v  # [B*T*H]
     return out
 
 class MultiHeadAttention(nn.Module):
@@ -122,7 +115,6 @@ class LanguageModel(nn.Module):
   def __init__(self, vocab_size, device='cpu'):
     super().__init__()
     self.token_embedding_table = nn.Embedding(vocab_size, n_embd)
-    self.posenc = PositionalEncoding(n_embd, block_size)
     self.blocks = nn.ModuleList()
     for _ in range(n_layer):
       self.blocks.append(Block(n_embd, n_head=n_head))
@@ -138,7 +130,6 @@ class LanguageModel(nn.Module):
       attn_mask = torch.where(attn_mask == 0, float('-inf'), 0.0)
 
     x = self.token_embedding_table(idx)  # (B, T, C)
-    x = self.posenc(x)  # (B, T, C)
     for block in self.blocks:
       x = block(x, attn_mask)  # (B, T, C)
     x = self.norm(x)
